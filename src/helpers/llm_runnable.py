@@ -12,7 +12,7 @@ import httpx
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import Runnable, RunnableConfig
-from openai import APIConnectionError, APIError, APITimeoutError
+from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
 from pydantic import BaseModel, ValidationError
 
 from helpers.llm_client import get_gateway_client
@@ -33,6 +33,18 @@ class GatewayCallError(LlmCallError):
     `routes/sanity_check.py` and `routes/verification.py` all catch
     `(LlmValidationError, LlmCallError)` and turn it into a useful HTTP error.
     A sibling class would escape those handlers and surface as a bare 500.
+    """
+
+
+class GatewayRejectedError(GatewayCallError):
+    """The gateway refused the request itself - HTTP 400/401/403/404/413/422,
+    e.g. an input longer than the model's context window.
+
+    Separate from its parent so the retry loop can tell it apart: sending the
+    identical request again gets the identical refusal, so it is not retried.
+    It is still an `LlmCallError`, so `run_tool_call`'s fallback to the other
+    model - the one thing that CAN help with a context-window refusal - still
+    happens, only without the backoff and repeat request in front of it.
     """
 
 
@@ -94,6 +106,13 @@ def build_response_schema(model: type[BaseModel], *, force_required: bool = True
         if properties:
             schema["required"] = list(properties.keys())
     return schema
+
+
+# HTTP statuses that mean the request itself was refused, where sending it
+# again unchanged can only be refused again. 408 (timeout), 409, 429 (rate
+# limit) and every 5xx are left retryable - those are the gateway or the model
+# being busy, which waiting can fix.
+_NOT_RETRYABLE_STATUSES = frozenset({400, 401, 403, 404, 413, 422})
 
 
 # Which requests get a free gateway slot first when more are waiting than
@@ -384,6 +403,10 @@ class GatewayStructuredLLM(Runnable[list[BaseMessage], str]):
                 )
         except (APITimeoutError, APIConnectionError) as exc:
             raise GatewayCallError(self._describe_transport_failure(exc, started)) from exc
+        except APIStatusError as exc:
+            if exc.status_code in _NOT_RETRYABLE_STATUSES:
+                raise GatewayRejectedError(str(exc)) from exc
+            raise GatewayCallError(str(exc)) from exc
         except APIError as exc:
             raise GatewayCallError(str(exc)) from exc
         except Exception as exc:
@@ -450,6 +473,11 @@ async def _call_with_retries(
                 "llm_call log_id=%s pass=%s attempt=%s/%s failed: %s",
                 log_id, pass_label, attempt, max_attempts, exc,
             )
+            if isinstance(exc, GatewayRejectedError):
+                # A refusal of the request itself is not transient - the same
+                # request is refused again after any backoff. Give up on this
+                # model now; the caller's fallback decides what happens next.
+                break
             # Transient backend errors need real recovery time - 1s wasn't enough
             # in practice. Exponential with a 30s cap plus a little jitter, so
             # concurrent chunks hitting the same failure don't all retry in lockstep.
