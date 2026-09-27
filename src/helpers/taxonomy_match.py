@@ -8,6 +8,7 @@ quantities should not cost 36 gateway requests to categorise.
 
 import re
 from difflib import SequenceMatcher
+from functools import lru_cache
 
 _PUNCTUATION = re.compile(r"[^\w\s]+", re.UNICODE)
 _WHITESPACE = re.compile(r"\s+")
@@ -74,6 +75,23 @@ MAX_TOKENS_PER_ALIAS_TOKEN = 6
 HEAD_TOKENS = 4
 
 
+@lru_cache(maxsize=8192)
+def _matcher_for(alias: str) -> SequenceMatcher:
+    """A matcher with `alias` already set as its second sequence.
+
+    SequenceMatcher analyses its SECOND sequence once, when it is set, and
+    `fuzzy_best_match` compares every item against every alias - so building a
+    fresh matcher per pair re-analysed each alias once per item. Only the first
+    sequence changes between calls (`set_seq1`), which is exactly the reuse
+    difflib documents. The order stays (needle, alias), so every ratio is the
+    one the old code computed. Shared safely: nothing awaits between setting
+    the needle and reading the ratio.
+    """
+    matcher = SequenceMatcher(None)
+    matcher.set_seq2(alias)
+    return matcher
+
+
 def fuzzy_best_match(
     text: str,
     candidates: dict[str, int],
@@ -122,7 +140,23 @@ def fuzzy_best_match(
         if speaks_for_the_line:
             score = min(0.99, 0.90 + 0.015 * len(alias_tokens))
         else:
-            score = SequenceMatcher(None, needle, alias).ratio()
+            # `ratio()` is the expensive part - it was most of the taxonomy
+            # stage's CPU time, spent with the event loop blocked. The two
+            # quick_ratio calls are difflib's own documented upper bounds on it,
+            # so an alias whose bound cannot beat the best so far (or cannot
+            # reach the threshold at all) is skipped with no effect on the
+            # outcome: `score > best_score` could not have held for it, and a
+            # sub-threshold best is discarded below either way.
+            matcher = _matcher_for(alias)
+            matcher.set_seq1(needle)
+            if (
+                matcher.real_quick_ratio() <= best_score
+                or matcher.real_quick_ratio() < minimum_score
+                or matcher.quick_ratio() <= best_score
+                or matcher.quick_ratio() < minimum_score
+            ):
+                continue
+            score = matcher.ratio()
         if score > best_score:
             best_score, best_node = score, node_id
 

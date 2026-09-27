@@ -14,11 +14,13 @@ pipeline has: everything else in a run is either already concurrent (extraction
 chunks, parse files) or a real data dependency (draft then verify over the
 draft, sanity then verification of its findings, persist then taxonomy).
 
-It costs one more request in flight at the gateway, against a ceiling
-(LLM_MAX_CONCURRENT_REQUESTS) every stage already shares. If that second
-request is ever measured costing extraction more than the scan saves, the two
-are competing for the same backend and COMPLETENESS_SCAN_DURING_EXTRACTION
-turns this off without a deploy.
+It shares a ceiling (LLM_MAX_CONCURRENT_REQUESTS) with every stage, but at
+background priority: when calls are queued for a slot, every pipeline call
+goes first and the scan takes only the slots nothing else is waiting for.
+Before that ordering existed, its excerpts queued ahead of extraction's verify
+passes and made the longest stage longer. If the scan is still ever measured
+costing extraction more than it saves - the two share one backend -
+COMPLETENESS_SCAN_DURING_EXTRACTION turns this off without a deploy.
 
 The task is owned by `pipeline.runner`, not by a node, because no node spans the
 whole run: a job that dies in any stage after the scan started must not leave a
@@ -33,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from controllers import CompletenessController
 from helpers import get_settings
+from helpers.llm_runnable import LLM_PRIORITY_BACKGROUND, set_llm_priority
 from pipeline.progress import JobProgress
 from pipeline.stages import COMPLETENESS_STAGE_ID
 from schema.completeness import CompletenessScanResult
@@ -109,6 +112,14 @@ class CompletenessPrescan:
         await asyncio.gather(self._task, return_exceptions=True)
 
     async def _scan(self, offer_id: int) -> list[CompletenessScanResult]:
+        # Behind extraction in the gateway queue, not beside it. This task is
+        # the only one that runs its own calls, and the priority is copied into
+        # every task it spawns, so the scan's excerpts all wait while any
+        # pipeline call is waiting - and still use every slot the pipeline is
+        # not. Its result is not needed until the completeness stage, long
+        # after extraction, sanity and verification, whose calls it used to
+        # queue ahead of. Changes the order of requests, never their content.
+        set_llm_priority(LLM_PRIORITY_BACKGROUND)
         await self._progress.start_stage(COMPLETENESS_STAGE_ID, "reading the documents for gaps")
         # Its OWN session, never the extraction stage's. The two run at the same
         # time, and one AsyncSession driven from two tasks interleaves

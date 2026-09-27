@@ -1,8 +1,11 @@
 import asyncio
+import contextvars
 import logging
 import random
 import time
 import weakref
+from collections import deque
+from contextlib import asynccontextmanager
 from typing import TypeVar
 
 import httpx
@@ -93,23 +96,122 @@ def build_response_schema(model: type[BaseModel], *, force_required: bool = True
     return schema
 
 
+# Which requests get a free gateway slot first when more are waiting than
+# there are slots. Lower is sooner. The value travels in a ContextVar rather
+# than as a parameter because the only thing that is ever demoted - the
+# completeness scan that runs beside extraction - is a whole asyncio.Task, and
+# every task it spawns copies its context: one `set` at the top of that task
+# demotes all of its calls without threading an argument through five layers.
+#
+# Why it exists: the gate below used to be a plain FIFO semaphore. The scan is
+# started a moment after extraction's first drafts are queued, so its calls
+# sat in the queue AHEAD of every verify pass - extraction's second half
+# waited behind work nothing downstream needed for minutes. Ordering the queue
+# changes nothing about any request's content, only which one is sent first.
+LLM_PRIORITY_CRITICAL = 0
+LLM_PRIORITY_BACKGROUND = 1
+_llm_priority: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "llm_priority", default=LLM_PRIORITY_CRITICAL
+)
+
+
+def set_llm_priority(priority: int) -> None:
+    """Sets the gateway-queue priority for the calling task and every task it
+    creates from here on. Call it at the top of a task that runs off the
+    pipeline's critical path; the default is critical."""
+    _llm_priority.set(priority)
+
+
+class _PriorityGate:
+    """A counting semaphore that hands a freed slot to the most urgent waiter,
+    FIFO among equals - with a single priority in play it behaves exactly like
+    the `asyncio.Semaphore` it replaced.
+
+    Background work is not kept off any slot, only queued behind pipeline work.
+    Reserving a slot for the pipeline was measured and was slower: the scan's
+    answers are needed by the completeness stage a few minutes later anyway,
+    and starving it of a slot just moved the wait to the end of the run.
+
+    Single event loop only, like the semaphore: no locks, because nothing
+    between a check and its update ever awaits.
+    """
+
+    def __init__(self, slots: int):
+        self._free = slots
+        self._waiting: dict[int, deque[asyncio.Future]] = {
+            LLM_PRIORITY_CRITICAL: deque(),
+            LLM_PRIORITY_BACKGROUND: deque(),
+        }
+
+    def _someone_ahead(self, priority: int) -> bool:
+        return any(
+            any(not future.done() for future in queue)
+            for level, queue in self._waiting.items()
+            if level <= priority
+        )
+
+    def _dispatch(self) -> None:
+        """Hands free slots to waiters, most urgent level first."""
+        while self._free > 0:
+            for level in sorted(self._waiting):
+                queue = self._waiting[level]
+                while queue and queue[0].done():
+                    queue.popleft()  # cancelled while waiting
+                if queue:
+                    self._free -= 1
+                    queue.popleft().set_result(None)
+                    break
+            else:
+                return
+
+    async def acquire(self, priority: int) -> None:
+        priority = priority if priority in self._waiting else LLM_PRIORITY_CRITICAL
+        if self._free > 0 and not self._someone_ahead(priority):
+            self._free -= 1
+            return
+        future = asyncio.get_running_loop().create_future()
+        self._waiting[priority].append(future)
+        try:
+            await future
+        except BaseException:
+            # Cancelled while waiting: the future is done, and `_dispatch`
+            # discards it. Cancelled in the instant between being handed the
+            # slot and resuming: the slot is ours, and it must be passed on or
+            # it leaks for the life of the process.
+            if future.done() and not future.cancelled():
+                self.release()
+            raise
+
+    def release(self) -> None:
+        self._free += 1
+        self._dispatch()
+
+    @asynccontextmanager
+    async def slot(self, priority: int):
+        await self.acquire(priority)
+        try:
+            yield
+        finally:
+            self.release()
+
+
 # One ceiling on how many requests this process has in flight at the gateway
 # at once, shared by every stage - extraction chunks, the completeness facets,
 # taxonomy resolution, and any other run happening concurrently for another
-# user. Keyed by event loop and held weakly: an `asyncio.Semaphore` belongs to
-# the loop that first awaited it, so a module-level singleton would bind a
-# test's throwaway loop forever.
+# user. Keyed by event loop and held weakly: the gate's futures belong to the
+# loop that created them, so a module-level singleton would bind a test's
+# throwaway loop forever.
 #
 # The gate is entered around the network call ONLY. Retry backoff and repair
 # re-prompting happen outside it, so a call that is merely sleeping between
 # attempts is not holding a slot that another chunk could be using.
-_gateway_gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+_gateway_gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _PriorityGate]" = (
     weakref.WeakKeyDictionary()
 )
 
 
-def _gateway_gate(max_concurrent_requests: int) -> asyncio.Semaphore:
-    """The semaphore for the running loop, created on first use.
+def _gateway_gate(max_concurrent_requests: int) -> _PriorityGate:
+    """The gate for the running loop, created on first use.
 
     Sized by the first caller on that loop; every stage passes the same
     configured value (`LLM_MAX_CONCURRENT_REQUESTS`), and the point of the gate
@@ -119,7 +221,7 @@ def _gateway_gate(max_concurrent_requests: int) -> asyncio.Semaphore:
     loop = asyncio.get_running_loop()
     gate = _gateway_gates.get(loop)
     if gate is None:
-        gate = asyncio.Semaphore(max(1, max_concurrent_requests))
+        gate = _PriorityGate(max(1, max_concurrent_requests))
         _gateway_gates[loop] = gate
     return gate
 
@@ -246,7 +348,7 @@ class GatewayStructuredLLM(Runnable[list[BaseMessage], str]):
         # queueing for one: the timeout it is compared against is per request.
         started: float | None = None
         try:
-            async with _gateway_gate(self.max_concurrent_requests):
+            async with _gateway_gate(self.max_concurrent_requests).slot(_llm_priority.get()):
                 started = time.monotonic()
                 response = await client.chat.completions.create(
                     model=self.model,
@@ -475,13 +577,10 @@ async def run_structured_call(
                 log_id, pass_label, attempt, repair_attempts_used, max_repair_attempts,
             )
 
-            if attempt < max_repair_attempts:
-                repair_backoff_seconds = 2 ** (attempt - 1)
-                logger.info(
-                    "llm_call log_id=%s pass=%s backing off %ss before repair attempt (attempt=%s/%s)",
-                    log_id, pass_label, repair_backoff_seconds, attempt, max_repair_attempts,
-                )
-                await asyncio.sleep(repair_backoff_seconds)
+            # No backoff before a repair. The model answered, and answered
+            # promptly - its JSON was wrong, which is not a transient fault
+            # that waiting clears; the correction prompt is sent at once.
+            # Transport failures keep their own backoff in `_call_with_retries`.
 
             # The rejected JSON goes back as an ASSISTANT turn followed by the
             # correction as a user turn, rather than folding both into one user

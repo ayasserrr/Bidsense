@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -326,7 +327,7 @@ class TaxonomyController(BaseController):
     async def _resolve_with_model(
         self, offer_id: int, items: list[OfferItem], nodes: dict[int, TaxonomyNode]
     ) -> int:
-        """One batched call for whatever alias matching could not place."""
+        """Batched calls for whatever alias matching could not place."""
         by_code = {node.code: node for node in nodes.values()}
         categories = [
             {
@@ -341,7 +342,10 @@ class TaxonomyController(BaseController):
         ]
         categories_json = json.dumps(categories)
 
-        resolved = 0
+        # Every batch's prompt is built up front, from rows already loaded, so
+        # the calls below never touch the session: several of them are in
+        # flight at once and one AsyncSession must not be driven from two tasks.
+        batches: list[tuple[int, dict[str, OfferItem], str]] = []
         for start in range(0, len(items), RESOLVE_BATCH_SIZE):
             batch = items[start : start + RESOLVE_BATCH_SIZE]
             by_ref = {str(item.item_id): item for item in batch}
@@ -356,6 +360,9 @@ class TaxonomyController(BaseController):
                     for item in batch
                 ]
             )
+            batches.append((start, by_ref, items_json))
+
+        async def resolve_batch(start: int, items_json: str) -> TaxonomyResolutionResult | None:
             try:
                 raw = await resolve_item_categories.ainvoke(
                     {
@@ -365,6 +372,7 @@ class TaxonomyController(BaseController):
                     }
                 )
                 result, _telemetry = unpack_result(raw, TaxonomyResolutionResult)
+                return result
             except Exception as exc:
                 # Unresolved items are a visible, fixable state - the report
                 # shows them as uncategorised and a reviewer assigns them. A
@@ -372,8 +380,30 @@ class TaxonomyController(BaseController):
                 logger.warning(
                     "taxonomy offer_id=%s batch at %s failed: %s", offer_id, start, exc
                 )
-                continue
+                return None
 
+        # The batches are independent - disjoint items, the same category list -
+        # so they go to the gateway together instead of one after another: a
+        # 150-row bill costs about one batch's time rather than four. Each
+        # batch's request is exactly what it was when they ran in sequence, and
+        # LLM_MAX_CONCURRENT_REQUESTS inside the transport still bounds them.
+        tasks = [
+            asyncio.create_task(resolve_batch(start, items_json))
+            for start, _by_ref, items_json in batches
+        ]
+        try:
+            results = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+        resolved = 0
+        # Applied in batch order, as the sequential loop did.
+        for (_start, by_ref, _items_json), result in zip(batches, results):
+            if result is None:
+                continue
             for assignment in result.assignments:
                 item = by_ref.get(assignment.item_ref)
                 node = by_code.get(assignment.node_code or "")
