@@ -1,0 +1,42 @@
+# PostgreSQL for Bidsense.
+#
+#   docker compose up -d
+#   alembic upgrade head          (from the repository root)
+#
+# The password below is applied ONCE, when the volume is first initialised.
+# Changing POSTGRES_PASSWORD afterwards does not change the role's password -
+# it only changes what this file claims it is. To change it on an existing
+# volume: docker exec -it bidsense-postgres psql -U bidsense -d presalesAIAssistedDB
+#         -c "ALTER USER bidsense WITH PASSWORD '...'"   then update DATABASE_URL.
+#
+# The named volume is what makes the data outlive `docker compose down`. Use
+# `down -v` only when you genuinely want to throw the offers away - it deletes
+# the volume with them.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: bidsense-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bidsense}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bidsense_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-presalesAIAssistedDB}
+    ports:
+      # 5436 on the host, not 5432: this machine already runs several other
+      # project databases (qualisense on 5432, lingora on 5433, mizan on 5434,
+      # unified on 5435). Bidsense takes the next free port so starting it
+      # never fights another project for the default one.
+      - "${POSTGRES_PORT:-5436}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Without this, `up -d` returns while Postgres is still starting and the
+      # first `alembic upgrade head` loses the race with a connection refusal.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bidsense} -d ${POSTGRES_DB:-presalesAIAssistedDB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  pgdata:

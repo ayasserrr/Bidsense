@@ -1,0 +1,22 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+python-multipart==0.0.32
+python-dotenv==1.2.3
+pydantic-settings==2.15.0
+aiofiles==25.1.0
+langchain==1.3.14
+langgraph==1.2.9
+sqlalchemy[asyncio]==2.0.44
+asyncpg==0.30.0
+alembic==1.16.5
+langdetect==1.0.9
+openai==2.51.0
+# Parsing Studio (document parsing) and the AD authentication service. No PDF
+# library is installed on purpose: files are read by the corporate service.
+httpx==0.28.1
+
+# Sign-in. Both were importing only by accident, as transitive dependencies of
+# whatever else happened to be installed - a clean environment would have had
+# the app fail at startup on `import bcrypt`.
+python-jose==3.5.0
+bcrypt==4.3.0

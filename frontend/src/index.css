@@ -1,0 +1,202 @@
+@import "tailwindcss";
+
+/* The Claude Design handoff bundle is vendored reference material, not app
+   source. Without this, Tailwind's auto source detection harvests every
+   class name out of its compiled stylesheet and emits ~80 unused utilities
+   (amber, slate, emerald ramps) that nothing here renders. */
+@source not "../Design system revamp-handoff";
+
+/* Dark mode is class-based in this design system: ThemeProvider toggles
+   `.dark` on <html>. Tailwind v4 defaults `dark:` to prefers-color-scheme,
+   so the variant is redefined here to follow the class instead. */
+@custom-variant dark (&:is(.dark *));
+
+/* ── Qualisense / Wedy Mate tokens ──────────────────────────────────────
+   Values are verbatim from the design system's own compiled stylesheet,
+   `_ds_bundle.css`. Every colour is a surface + `-foreground` pair, so
+   contrast follows in both themes. There is deliberately no second error
+   hue - errors reuse `destructive`, and `success` is for positive deltas
+   only.
+
+   The base colours are declared as literal values, not as aliases of a
+   second variable. Given a bare `var()` here, Tailwind emits the colour
+   at full strength and silently drops any opacity modifier - so
+   `bg-destructive/5` would paint a solid red card rather than a 5% wash.
+   Literal values avoid that; `.dark` below still overrides them at
+   runtime, and the tint tokens cover the washes. */
+@theme {
+  --color-background: oklch(0.974 0 0);
+  --color-foreground: oklch(0.235 0 0);
+  --color-card: oklch(1 0 0);
+  --color-card-foreground: oklch(0.235 0 0);
+  --color-popover: oklch(1 0 0);
+  --color-popover-foreground: oklch(0.235 0 0);
+  --color-primary: oklch(0.235 0 0);
+  --color-primary-foreground: oklch(0.974 0 0);
+  --color-secondary: oklch(0.94 0 0);
+  --color-secondary-foreground: oklch(0.235 0 0);
+  --color-muted: oklch(0.945 0 0);
+  --color-muted-foreground: oklch(0.5 0 0);
+  --color-accent: #db010a;
+  --color-accent-foreground: #ffffff;
+  --color-success: #16a34a;
+  --color-success-foreground: #ffffff;
+  --color-destructive: oklch(0.55 0.21 27);
+  --color-destructive-foreground: oklch(0.985 0 0);
+  --color-border: oklch(0.89 0 0);
+  --color-input: oklch(0.92 0 0);
+  --color-ring: oklch(0.55 0.22 27);
+
+  /* Tints, used in place of every `bg-accent/10`-style opacity modifier.
+     Tailwind resolves a modifier against the theme value at build time and
+     bakes the result to a static colour, which would freeze the light
+     value and stop tracking `.dark`. Mixing against the live alias here
+     keeps the wash theme-aware. Percentages match the design system's own
+     component source. */
+  --color-accent-5: color-mix(in oklab, var(--accent) 5%, transparent);
+  --color-accent-10: color-mix(in oklab, var(--accent) 10%, transparent);
+  --color-accent-12: color-mix(in oklab, var(--accent) 12%, transparent);
+  --color-accent-15: color-mix(in oklab, var(--accent) 15%, transparent);
+  --color-accent-25: color-mix(in oklab, var(--accent) 25%, transparent);
+  --color-accent-30: color-mix(in oklab, var(--accent) 30%, transparent);
+  --color-accent-35: color-mix(in oklab, var(--accent) 35%, transparent);
+  --color-accent-40: color-mix(in oklab, var(--accent) 40%, transparent);
+  --color-destructive-5: color-mix(in oklab, var(--destructive) 5%, transparent);
+  --color-destructive-10: color-mix(in oklab, var(--destructive) 10%, transparent);
+  --color-destructive-12: color-mix(in oklab, var(--destructive) 12%, transparent);
+  --color-destructive-30: color-mix(in oklab, var(--destructive) 30%, transparent);
+  --color-success-10: color-mix(in oklab, var(--success) 10%, transparent);
+  --color-success-30: color-mix(in oklab, var(--success) 30%, transparent);
+  --color-muted-30: color-mix(in oklab, var(--muted) 30%, transparent);
+  --color-muted-40: color-mix(in oklab, var(--muted) 40%, transparent);
+  --color-muted-60: color-mix(in oklab, var(--muted) 60%, transparent);
+  --color-foreground-80: color-mix(in oklab, var(--foreground) 80%, transparent);
+  --color-muted-foreground-60: color-mix(in oklab, var(--muted-foreground) 60%, transparent);
+  --color-border-60: color-mix(in oklab, var(--border) 60%, transparent);
+
+  --font-sans: "Montserrat", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+
+  --shadow-soft: 0 8px 30px -10px rgba(0, 0, 0, 0.15);
+  --shadow-glow: 0 4px 18px rgba(219, 1, 10, 0.35);
+  --shadow-glow-lg: 0 8px 28px rgba(219, 1, 10, 0.45);
+  --shadow-hero: 0 24px 64px rgba(0, 0, 0, 0.14);
+}
+
+.dark {
+  --color-background: oklch(0.16 0 0);
+  --color-foreground: oklch(0.96 0 0);
+  --color-card: oklch(0.2 0 0);
+  --color-card-foreground: oklch(0.96 0 0);
+  --color-popover: oklch(0.2 0 0);
+  --color-popover-foreground: oklch(0.96 0 0);
+  --color-primary: oklch(0.96 0 0);
+  --color-primary-foreground: oklch(0.18 0 0);
+  --color-secondary: oklch(0.24 0 0);
+  --color-secondary-foreground: oklch(0.96 0 0);
+  --color-muted: oklch(0.23 0 0);
+  --color-muted-foreground: oklch(0.66 0 0);
+  /* Lifted for contrast on the dark surface. */
+  --color-success: #22c55e;
+  --color-success-foreground: oklch(0.16 0 0);
+  --color-destructive: oklch(0.62 0.2 25);
+  --color-destructive-foreground: oklch(0.98 0 0);
+  --color-border: oklch(1 0 0 / 10%);
+  --color-input: oklch(1 0 0 / 12%);
+  --color-ring: oklch(0.6 0.22 27);
+}
+
+/* Short aliases, so a hand-written `var(--card)` inside an arbitrary value
+   (a ring colour, a color-mix wash) tracks the active theme too. */
+:root {
+  --radius: 0.625rem;
+  --background: var(--color-background);
+  --foreground: var(--color-foreground);
+  --card: var(--color-card);
+  --muted: var(--color-muted);
+  --muted-foreground: var(--color-muted-foreground);
+  --accent: var(--color-accent);
+  --accent-foreground: var(--color-accent-foreground);
+  --success: var(--color-success);
+  --destructive: var(--color-destructive);
+  --border: var(--color-border);
+  --input: var(--color-input);
+  --ring: var(--color-ring);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html {
+    font-family: var(--font-sans);
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+}
+
+@layer utilities {
+  /* Stat values and table numerals - same-width digits so columns don't
+     jitter as a polled value changes. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Zebra-striped spec tables, per the design system's `qs-table`. */
+.qs-table tbody tr:nth-child(even) {
+  background: color-mix(in oklab, var(--color-muted) 45%, transparent);
+}
+
+.qs-table tbody tr:hover {
+  background: color-mix(in oklab, var(--color-accent) 8%, transparent);
+}
+
+.qs-table td,
+.qs-table th {
+  white-space: normal;
+  word-break: break-word;
+}
+
+@keyframes qsspin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes qspulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+.dark ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 999px;
+}
+
+.dark ::-webkit-scrollbar-track {
+  background: transparent;
+}
